@@ -27,7 +27,7 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
 
-    const SPECIAL_NAMES = new Set(['orion', 'magicaldroid', '😎', 'admin', 'dev']);
+    const SPECIAL_NAMES = new Set(['orion', 'magicaldroid', '😎', 'admin', 'dev', 'luca']);
     const isSpecialName = (name) => SPECIAL_NAMES.has((name || '').trim().toLowerCase());
 
     const EMOJI_CHOICES = [
@@ -64,18 +64,19 @@
         mode, // 'sitaround' | 'passplay' | 'online'
         cards,
         suits: [], // { id: 0..n-1, name, emoji }
-        constraints: [], // { type: 'NOT_SUIT', cardId, suitId } | { type: 'ONE_OF_IN_SET', cardIds: number[], suitId }
+        constraints: [], // { type: 'NOT_SUIT' | 'IS_SUIT', cardId, suitId } | { type: 'ONE_OF_IN_SET', cardIds: number[], suitId }
         currentTurn: 0,
         turnCount: 1,
         log: ['Game started! All cards are in quantum superposition.'],
         status: 'PLAYING', // 'PLAYING' | 'GAME_OVER'
-        result: null, // { won: boolean, title, reason, counterExample?: number[], proof?: string }
-        animatingTransfer: null // { cardId, fromPlayer, toPlayer, suitId, flipped: boolean }
+        result: null, // { won: boolean, title, reason, counterExample?: number[] }
+        turnNotice: null, // { title, reason, counterExample?: number[] }
+        revealingCards: null // { cardIds: number[], suitEmoji: string, suitName: string }
       };
     }
 
     // Backtracking SAT solver over card assignments (cardId -> 0..numPlayers-1)
-    // Symmetries on unnamed suit slots (suitId >= suits.length) are pruned for speed.
+    // Symmetries on unnamed suit slots (suitId >= namedSuitCount) are pruned for speed.
     function findValidAssignment(numPlayers, cards, namedSuitCount, constraints, forcedOverrides = {}) {
       const totalCards = numPlayers * 4;
       const possible = Array.from({ length: totalCards }, () => new Set());
@@ -165,17 +166,206 @@
       return backtrack(0, namedSuitCount - 1);
     }
 
-    // Deduce exact per-card possibilities and deterministic deductions
+    // Backtracking SAT solver checking if a valid assignment exists matching each player's multiset of suits (order-independent)
+    function findValidAssignmentWithMultisets(numPlayers, cards, namedSuitCount, constraints, playerMultisets) {
+      const totalCards = numPlayers * 4;
+      const possible = Array.from({ length: totalCards }, () => new Set());
+      for (let i = 0; i < totalCards; i++) {
+        const owner = cards[i].owner;
+        for (let s = 0; s < numPlayers; s++) {
+          if ((playerMultisets[owner]?.[s] || 0) > 0) {
+            possible[i].add(s);
+          }
+        }
+      }
+
+      const setConstraints = [];
+      for (const c of constraints) {
+        if (c.type === 'NOT_SUIT') {
+          possible[c.cardId].delete(c.suitId);
+        } else if (c.type === 'IS_SUIT') {
+          for (let s = 0; s < numPlayers; s++) {
+            if (s !== c.suitId) possible[c.cardId].delete(s);
+          }
+        } else if (c.type === 'ONE_OF_IN_SET') {
+          setConstraints.push(c);
+        }
+      }
+
+      for (let i = 0; i < totalCards; i++) {
+        if (possible[i].size === 0) return null;
+      }
+
+      const assignment = new Array(totalCards).fill(-1);
+      const remainingPlayerSuits = playerMultisets.map((ms) => [...ms]);
+      const suitCounts = new Array(numPlayers).fill(0);
+
+      const order = Array.from({ length: totalCards }, (_, i) => i)
+        .sort((a, b) => possible[a].size - possible[b].size);
+
+      function checkSetConstraintsPartial() {
+        for (const sc of setConstraints) {
+          let satisfied = false;
+          let hasUnassigned = false;
+          for (const cid of sc.cardIds) {
+            if (assignment[cid] === sc.suitId) {
+              satisfied = true;
+              break;
+            }
+            if (assignment[cid] === -1 && possible[cid].has(sc.suitId)) {
+              hasUnassigned = true;
+            }
+          }
+          if (!satisfied && !hasUnassigned) return false;
+        }
+        return true;
+      }
+
+      function backtrack(idx) {
+        if (idx === totalCards) {
+          return assignment.slice();
+        }
+        const cid = order[idx];
+        const owner = cards[cid].owner;
+        const remainingSlots = totalCards - idx;
+
+        for (let s = 0; s < numPlayers; s++) {
+          const needed = 4 - suitCounts[s];
+          if (needed < 0 || needed > remainingSlots) return null;
+        }
+
+        for (const s of possible[cid]) {
+          if (suitCounts[s] >= 4) continue;
+          if (remainingPlayerSuits[owner][s] <= 0) continue;
+
+          assignment[cid] = s;
+          suitCounts[s]++;
+          remainingPlayerSuits[owner][s]--;
+
+          if (checkSetConstraintsPartial()) {
+            const res = backtrack(idx + 1);
+            if (res) return res;
+          }
+
+          assignment[cid] = -1;
+          suitCounts[s]--;
+          remainingPlayerSuits[owner][s]++;
+        }
+        return null;
+      }
+
+      return backtrack(0);
+    }
+
+    // Backtracking SAT solver searching for ANY valid assignment whose per-player suit multiset differs from targetMultisets
+    function findDifferentMultisetAssignment(numPlayers, cards, namedSuitCount, constraints, targetMultisets) {
+      const totalCards = numPlayers * 4;
+      const possible = Array.from({ length: totalCards }, () => new Set());
+      for (let i = 0; i < totalCards; i++) {
+        for (let s = 0; s < numPlayers; s++) possible[i].add(s);
+      }
+
+      const setConstraints = [];
+      for (const c of constraints) {
+        if (c.type === 'NOT_SUIT') {
+          possible[c.cardId].delete(c.suitId);
+        } else if (c.type === 'IS_SUIT') {
+          for (let s = 0; s < numPlayers; s++) {
+            if (s !== c.suitId) possible[c.cardId].delete(s);
+          }
+        } else if (c.type === 'ONE_OF_IN_SET') {
+          setConstraints.push(c);
+        }
+      }
+
+      for (let i = 0; i < totalCards; i++) {
+        if (possible[i].size === 0) return null;
+      }
+
+      const assignment = new Array(totalCards).fill(-1);
+      const currentPlayerSuits = Array.from({ length: numPlayers }, () => new Array(numPlayers).fill(0));
+      const suitCounts = new Array(numPlayers).fill(0);
+
+      const order = Array.from({ length: totalCards }, (_, i) => i)
+        .sort((a, b) => possible[a].size - possible[b].size);
+
+      function checkSetConstraintsPartial() {
+        for (const sc of setConstraints) {
+          let satisfied = false;
+          let hasUnassigned = false;
+          for (const cid of sc.cardIds) {
+            if (assignment[cid] === sc.suitId) {
+              satisfied = true;
+              break;
+            }
+            if (assignment[cid] === -1 && possible[cid].has(sc.suitId)) {
+              hasUnassigned = true;
+            }
+          }
+          if (!satisfied && !hasUnassigned) return false;
+        }
+        return true;
+      }
+
+      function differsFromTarget() {
+        for (let p = 0; p < numPlayers; p++) {
+          for (let s = 0; s < numPlayers; s++) {
+            if (currentPlayerSuits[p][s] !== targetMultisets[p][s]) return true;
+          }
+        }
+        return false;
+      }
+
+      function backtrack(idx, maxUnnamedUsed) {
+        if (idx === totalCards) {
+          return differsFromTarget() ? assignment.slice() : null;
+        }
+        const cid = order[idx];
+        const owner = cards[cid].owner;
+        const remainingSlots = totalCards - idx;
+
+        for (let s = 0; s < numPlayers; s++) {
+          const needed = 4 - suitCounts[s];
+          if (needed < 0 || needed > remainingSlots) return null;
+        }
+
+        for (const s of possible[cid]) {
+          if (suitCounts[s] >= 4) continue;
+          if (s >= namedSuitCount && s > maxUnnamedUsed + 1) continue;
+
+          assignment[cid] = s;
+          suitCounts[s]++;
+          currentPlayerSuits[owner][s]++;
+
+          if (checkSetConstraintsPartial()) {
+            const nextMaxUnnamed = s >= namedSuitCount ? Math.max(maxUnnamedUsed, s) : maxUnnamedUsed;
+            const res = backtrack(idx + 1, nextMaxUnnamed);
+            if (res) return res;
+          }
+
+          assignment[cid] = -1;
+          suitCounts[s]--;
+          currentPlayerSuits[owner][s]--;
+        }
+        return null;
+      }
+
+      return backtrack(0, namedSuitCount - 1);
+    }
+
+    // Deduce exact per-card possibilities, known cards, and eliminated suits
     function analyzeQuantumState(state) {
       const { numPlayers, cards, suits, constraints } = state;
       const totalCards = numPlayers * 4;
       const namedCount = suits.length;
+      const unnamedCount = numPlayers - namedCount;
 
       const cardPossibilities = Array.from({ length: totalCards }, () => new Set());
+      const canBeUnnamed = new Array(totalCards).fill(false);
       let sampleWorld = null;
 
       for (let cid = 0; cid < totalCards; cid++) {
-        // Test named suits individually
+        // 1. Test each named suit individually
         for (let s = 0; s < namedCount; s++) {
           const world = findValidAssignment(numPlayers, cards, namedCount, constraints, { [cid]: s });
           if (world) {
@@ -183,19 +373,23 @@
             if (!sampleWorld) sampleWorld = world;
           }
         }
-        // Test unnamed suits (all unnamed suits share symmetry up to constraints)
-        for (let s = namedCount; s < numPlayers; s++) {
-          const world = findValidAssignment(numPlayers, cards, namedCount, constraints, { [cid]: s });
+        // 2. Test the unnamed suit equivalence class via the first unnamed slot (namedCount)
+        if (unnamedCount > 0) {
+          const world = findValidAssignment(numPlayers, cards, namedCount, constraints, { [cid]: namedCount });
           if (world) {
-            cardPossibilities[cid].add(s);
+            canBeUnnamed[cid] = true;
+            for (let s = namedCount; s < numPlayers; s++) {
+              cardPossibilities[cid].add(s);
+            }
             if (!sampleWorld) sampleWorld = world;
           }
         }
       }
 
-      // Compute deterministic known cards & impossible named suits
+      // Compute deterministic known cards & impossible suits per card
       const knownSuit = new Array(totalCards).fill(null);
       const impossibleNamedSuits = Array.from({ length: totalCards }, () => []);
+      const unnamedEliminated = new Array(totalCards).fill(false);
 
       for (let cid = 0; cid < totalCards; cid++) {
         if (cardPossibilities[cid].size === 1) {
@@ -206,6 +400,40 @@
             impossibleNamedSuits[cid].push(s);
           }
         }
+        if (unnamedCount > 0 && !canBeUnnamed[cid]) {
+          unnamedEliminated[cid] = true;
+        }
+      }
+
+      // Compute per-suit summary (confirmed known count & candidate cards)
+      const suitSummaries = [];
+      for (let s = 0; s < namedCount; s++) {
+        const knownCards = [];
+        const candidateCards = [];
+        for (let cid = 0; cid < totalCards; cid++) {
+          if (knownSuit[cid] === s) knownCards.push(cid);
+          if (cardPossibilities[cid].has(s)) candidateCards.push(cid);
+        }
+        suitSummaries.push({
+          suitId: s,
+          label: `${suits[s].emoji} ${suits[s].name}`,
+          knownCards,
+          candidateCards
+        });
+      }
+      if (unnamedCount > 0) {
+        const knownCards = [];
+        const candidateCards = [];
+        for (let cid = 0; cid < totalCards; cid++) {
+          if (knownSuit[cid] !== null && knownSuit[cid] >= namedCount) knownCards.push(cid);
+          if (canBeUnnamed[cid]) candidateCards.push(cid);
+        }
+        suitSummaries.push({
+          suitId: namedCount,
+          label: unnamedCount === 1 ? '❔ Final Unnamed Suit' : `❔ ${unnamedCount} Unnamed Suits (${unnamedCount * 4} cards)`,
+          knownCards,
+          candidateCards
+        });
       }
 
       return {
@@ -213,7 +441,10 @@
         sampleWorld,
         cardPossibilities,
         knownSuit,
-        impossibleNamedSuits
+        impossibleNamedSuits,
+        unnamedEliminated,
+        unnamedCount,
+        suitSummaries
       };
     }
 
@@ -245,7 +476,7 @@
 
       // Turn Action UI State
       const [actionPanel, setActionPanel] = useState('MAIN'); // 'MAIN' | 'ASK' | 'RESPOND' | 'CLAIM' | 'GUESS'
-      const [pendingAsk, setPendingAsk] = useState(null); // { asker, target, suitId, isNewSuit, newSuitName, newSuitEmoji }
+      const [pendingAsk, setPendingAsk] = useState(null); // { asker, target, suitId, suitName, suitEmoji, askerCardId }
       const [selectedTarget, setSelectedTarget] = useState(null);
       const [selectedSuitOption, setSelectedSuitOption] = useState('NEW'); // number | 'NEW'
       const [newSuitName, setNewSuitName] = useState('');
@@ -256,7 +487,7 @@
       // Paradox Warning Modal for Special Names
       const [paradoxWarning, setParadoxWarning] = useState(null); // { title, message, onProceed }
 
-      // Secret Inspector (Orion / Konami)
+      // Secret Inspector (Orion / Luca / Konami)
       const [konamiUnlocked, setKonamiUnlocked] = useState(false);
       const [inspectorOpen, setInspectorOpen] = useState(false);
       const konamiBufferRef = useRef([]);
@@ -315,7 +546,6 @@
           const activeP = gameState.players[activeIdx];
           return activeP && isSpecialName(activeP.name);
         }
-        // Sit-around: allow if any player in the game has a special name
         return gameState.players.some((p) => isSpecialName(p.name));
       }, [konamiUnlocked, gameState, mode, myOnlineName, playerNames, mySeatIndex, pendingAsk]);
 
@@ -366,7 +596,6 @@
         setConnectedPeers(initialRoster);
         setOnlineStatus('Room created! Share code ' + code + ' with friends.');
 
-        // Cross-tab BroadcastChannel fallback
         if (bcRef.current) bcRef.current.close();
         const bc = new BroadcastChannel('qgf_room_' + code);
         bcRef.current = bc;
@@ -392,7 +621,6 @@
           }
         };
 
-        // PeerJS WebRTC
         if (window.Peer) {
           if (peerRef.current) peerRef.current.destroy();
           const peer = new window.Peer('qgf-room-' + code, {
@@ -516,6 +744,7 @@
         const nextState = {
           ...baseState,
           status: 'GAME_OVER',
+          turnNotice: null,
           log: [`💥 PARADOX! ${player.name} lost: ${reasonText}`, ...baseState.log],
           result: {
             won: false,
@@ -549,18 +778,19 @@
         const askerCards = gameState.cards.filter((c) => c.owner === askerIdx);
         const targetCards = gameState.cards.filter((c) => c.owner === targetIdx);
 
-        // Check if asking is legal: asker must have at least 1 card that can be suitId, and target must have >= 1 card
-        const testConstraints = [
-          ...gameState.constraints,
-          { type: 'ONE_OF_IN_SET', cardIds: askerCards.map((c) => c.id), suitId }
-        ];
-        const validWorld =
-          askerCards.length > 0 &&
-          targetCards.length > 0 &&
-          findValidAssignment(gameState.numPlayers, gameState.cards, updatedSuits.length, testConstraints);
+        // Pick a valid card in asker's hand that can be suitId to flip over as proof
+        const validAskerCard =
+          targetCards.length > 0
+            ? askerCards.find((ac) =>
+                findValidAssignment(gameState.numPlayers, gameState.cards, updatedSuits.length, [
+                  ...gameState.constraints,
+                  { type: 'IS_SUIT', cardId: ac.id, suitId }
+                ])
+              )
+            : null;
 
         const performAskAction = () => {
-          if (!validWorld) {
+          if (!validAskerCard) {
             const stateWithSuit = { ...gameState, suits: updatedSuits };
             triggerLoss(
               stateWithSuit,
@@ -570,13 +800,24 @@
             return;
           }
 
-          // Commit the constraint that asker has at least one card of suitId
+          // Flip over asker's proof card and lock its suit
+          const committedConstraints = [
+            ...gameState.constraints,
+            { type: 'IS_SUIT', cardId: validAskerCard.id, suitId }
+          ];
+
           const nextState = {
             ...gameState,
             suits: updatedSuits,
-            constraints: testConstraints,
+            constraints: committedConstraints,
+            turnNotice: null,
+            revealingCards: {
+              cardIds: [validAskerCard.id],
+              suitEmoji: suitObj.emoji,
+              suitName: suitObj.name
+            },
             log: [
-              `${asker.name} asks ${target.name}: "Do you have any ${suitObj.emoji} ${suitObj.name}?"`,
+              `${asker.name} reveals ${suitObj.emoji} ${suitObj.name} on Card #${validAskerCard.id + 1} and asks ${target.name}: "Do you have any ${suitObj.emoji} ${suitObj.name}?"`,
               ...gameState.log
             ]
           };
@@ -586,7 +827,8 @@
             target: targetIdx,
             suitId,
             suitName: suitObj.name,
-            suitEmoji: suitObj.emoji
+            suitEmoji: suitObj.emoji,
+            askerCardId: validAskerCard.id
           };
 
           if (gameState.mode === 'passplay') {
@@ -595,7 +837,7 @@
           applySyncedState(nextState, askPayload, 'RESPOND');
         };
 
-        if (!validWorld && isSpecialName(asker.name)) {
+        if (!validAskerCard && isSpecialName(asker.name)) {
           setParadoxWarning({
             title: 'Paradox Warning!',
             message: `${asker.name}, asking ${target.name} for ${suitObj.emoji} ${suitObj.name} violates your known hand possibilities and will immediately cause a Paradox loss!`,
@@ -616,18 +858,15 @@
         const askerObj = gameState.players[asker];
         const targetObj = gameState.players[target];
 
-        const askerCards = gameState.cards.filter((c) => c.owner === asker);
         const targetCards = gameState.cards.filter((c) => c.owner === target);
 
         let proposedConstraints;
         if (answerYes) {
-          // Target must have at least one card of suitId
           proposedConstraints = [
             ...gameState.constraints,
             { type: 'ONE_OF_IN_SET', cardIds: targetCards.map((c) => c.id), suitId }
           ];
         } else {
-          // None of target's cards can be suitId
           proposedConstraints = [
             ...gameState.constraints,
             ...targetCards.map((c) => ({ type: 'NOT_SUIT', cardId: c.id, suitId }))
@@ -644,7 +883,7 @@
         const performResponseAction = () => {
           if (!validWorld) {
             triggerLoss(
-              gameState,
+              { ...gameState, revealingCards: null },
               target,
               `${targetObj.name} answered "${answerYes ? 'YES' : 'NO'}" to ${suitEmoji} ${suitName}, contradicting the quantum state!`
             );
@@ -657,6 +896,8 @@
             const nextState = {
               ...gameState,
               constraints: proposedConstraints,
+              revealingCards: null,
+              turnNotice: null,
               currentTurn: nextTurn,
               turnCount: gameState.turnCount + 1,
               log: [
@@ -669,7 +910,7 @@
             return;
           }
 
-          // YES: Pick a valid card from target that can be suitId, flip reveal both asker's proof card & transferred card, then transfer!
+          // YES: Pick a valid card from target that can be suitId, flip reveal it alongside asker's card, then slide across and flip back!
           const validTargetCard =
             targetCards.find((tc) =>
               findValidAssignment(gameState.numPlayers, gameState.cards, gameState.suits.length, [
@@ -678,37 +919,22 @@
               ])
             ) || targetCards[0];
 
-          const validAskerCard =
-            askerCards.find((ac) =>
-              findValidAssignment(gameState.numPlayers, gameState.cards, gameState.suits.length, [
-                ...proposedConstraints,
-                { type: 'IS_SUIT', cardId: validTargetCard.id, suitId },
-                { type: 'IS_SUIT', cardId: ac.id, suitId }
-              ])
-            ) || askerCards[0];
-
-          // Lock that transferred card is definitely suitId (and asker card is suitId)
           const finalConstraints = [
             ...proposedConstraints,
-            { type: 'IS_SUIT', cardId: validTargetCard.id, suitId },
-            { type: 'IS_SUIT', cardId: validAskerCard.id, suitId }
+            { type: 'IS_SUIT', cardId: validTargetCard.id, suitId }
           ];
 
-          // Animate flip & slide before finalizing ownership
           const animState = {
             ...gameState,
             constraints: finalConstraints,
-            animatingTransfer: {
-              transferredCardId: validTargetCard.id,
-              askerCardId: validAskerCard.id,
-              fromPlayer: target,
-              toPlayer: asker,
-              suitId,
+            turnNotice: null,
+            revealingCards: {
+              cardIds: [pendingAsk.askerCardId, validTargetCard.id],
               suitEmoji,
               suitName
             },
             log: [
-              `${targetObj.name} says YES! Reveals ${suitEmoji} ${suitName} and slides 1 card to ${askerObj.name}.`,
+              `${targetObj.name} says YES! Flips Card #${validTargetCard.id + 1} (${suitEmoji} ${suitName}) and slides it to ${askerObj.name}.`,
               ...gameState.log
             ]
           };
@@ -724,7 +950,7 @@
               const settledState = {
                 ...curr,
                 cards: updatedCards,
-                animatingTransfer: null,
+                revealingCards: null,
                 currentTurn: nextTurn,
                 turnCount: curr.turnCount + 1
               };
@@ -758,28 +984,32 @@
         const suitObj = gameState.suits[suitId];
         const playerCards = gameState.cards.filter((c) => c.owner === playerIdx);
 
-        if (playerCards.length !== 4) return;
+        // Anyone with at least 4 cards can claim victory
+        if (playerCards.length < 4) return;
 
-        // Try to find ANY valid world where at least one of player's 4 cards is NOT suitId
-        // Equivalently, at least one card owned by someone else IS suitId
+        // Try to find ANY valid world where at least one card owned by someone else IS suitId
+        // If no other player can hold suitId, then all 4 cards of suitId must belong to player!
         const otherCards = gameState.cards.filter((c) => c.owner !== playerIdx);
         const counterConstraints = [
           ...gameState.constraints,
           { type: 'ONE_OF_IN_SET', cardIds: otherCards.map((c) => c.id), suitId }
         ];
 
-        const counterWorld = findValidAssignment(
-          gameState.numPlayers,
-          gameState.cards,
-          gameState.suits.length,
-          counterConstraints
-        );
+        const counterWorld =
+          otherCards.length > 0
+            ? findValidAssignment(
+                gameState.numPlayers,
+                gameState.cards,
+                gameState.suits.length,
+                counterConstraints
+              )
+            : null;
 
         if (!counterWorld) {
-          // Victory! It is logically impossible for player not to hold all 4 of suitId
           const nextState = {
             ...gameState,
             status: 'GAME_OVER',
+            turnNotice: null,
             log: [`🏆 ${player.name} CLAIMED VICTORY with all 4 ${suitObj.emoji} ${suitObj.name}!`, ...gameState.log],
             result: {
               won: true,
@@ -789,18 +1019,23 @@
           };
           applySyncedState(nextState, null, 'MAIN');
         } else {
-          // Counter-example found!
+          // Failed Claim Victory does NOT end the game—only ends the turn!
+          const nextTurn = (playerIdx + 1) % gameState.numPlayers;
           const nextState = {
             ...gameState,
-            status: 'GAME_OVER',
-            log: [`❌ ${player.name} failed Claim Victory on ${suitObj.emoji} ${suitObj.name} — counter-example exists!`, ...gameState.log],
-            result: {
-              won: false,
-              title: `${player.name}'s Victory Claim Refuted!`,
-              reason: `Another quantum reality exists where ${player.name} does NOT have all 4 ${suitObj.emoji} ${suitObj.name}.`,
+            currentTurn: nextTurn,
+            turnCount: gameState.turnCount + 1,
+            turnNotice: {
+              title: `${player.name}'s Victory Claim Refuted! (Turn Ended)`,
+              reason: `Another quantum reality exists where ${player.name} does NOT hold all 4 ${suitObj.emoji} ${suitObj.name}. Play passes to ${gameState.players[nextTurn].name}.`,
               counterExample: counterWorld
-            }
+            },
+            log: [
+              `❌ ${player.name}'s Claim Victory on ${suitObj.emoji} ${suitObj.name} was refuted — turn passes to ${gameState.players[nextTurn].name}.`,
+              ...gameState.log
+            ]
           };
+          if (gameState.mode === 'passplay') setPassPrivacyScreen(true);
           applySyncedState(nextState, null, 'MAIN');
         }
       };
@@ -810,78 +1045,88 @@
         const player = gameState.players[playerIdx];
         const totalCards = gameState.numPlayers * 4;
 
-        // Build proposed assignment array from guessMap
-        const proposed = new Array(totalCards);
+        // Build per-player suit multisets (order-independent)
+        const playerMultisets = Array.from({ length: gameState.numPlayers }, () =>
+          new Array(gameState.numPlayers).fill(0)
+        );
         for (let cid = 0; cid < totalCards; cid++) {
           if (guessMap[cid] === undefined || guessMap[cid] === null) return;
-          proposed[cid] = Number(guessMap[cid]);
+          const owner = gameState.cards[cid].owner;
+          const suitId = Number(guessMap[cid]);
+          playerMultisets[owner][suitId]++;
         }
 
-        // 1. Check if proposed assignment itself is valid
-        const isProposedValid = findValidAssignment(
+        // 1. Check if ANY valid assignment exists matching the guessed suit counts per player (order doesn't matter)
+        const matchingWorld = findValidAssignmentWithMultisets(
           gameState.numPlayers,
           gameState.cards,
           gameState.suits.length,
           gameState.constraints,
-          Object.fromEntries(proposed.map((s, cid) => [cid, s]))
+          playerMultisets
         );
 
-        if (!isProposedValid) {
+        const nextTurn = (playerIdx + 1) % gameState.numPlayers;
+
+        if (!matchingWorld) {
           const validSample = analysis.sampleWorld;
           const nextState = {
             ...gameState,
-            status: 'GAME_OVER',
-            log: [`❌ ${player.name} guessed an impossible board state and lost!`, ...gameState.log],
-            result: {
-              won: false,
-              title: `${player.name}'s Full Guess Was Invalid!`,
-              reason: `Your guessed card assignment violates the game's constraints. Here is a valid reality instead:`,
+            currentTurn: nextTurn,
+            turnCount: gameState.turnCount + 1,
+            turnNotice: {
+              title: `${player.name}'s Final Guess Was Invalid! (Turn Ended)`,
+              reason: `No valid quantum reality matches those hand counts. Here is a valid reality instead—play passes to ${gameState.players[nextTurn].name}.`,
               counterExample: validSample
-            }
+            },
+            log: [
+              `❌ ${player.name} guessed an impossible hand distribution — turn passes to ${gameState.players[nextTurn].name}.`,
+              ...gameState.log
+            ]
           };
+          if (gameState.mode === 'passplay') setPassPrivacyScreen(true);
           applySyncedState(nextState, null, 'MAIN');
           return;
         }
 
-        // 2. Check if ANY OTHER valid assignment exists (differing on at least one card)
-        let alternateWorld = null;
-        for (let cid = 0; cid < totalCards; cid++) {
-          const alt = findValidAssignment(
-            gameState.numPlayers,
-            gameState.cards,
-            gameState.suits.length,
-            [...gameState.constraints, { type: 'NOT_SUIT', cardId: cid, suitId: proposed[cid] }]
-          );
-          if (alt) {
-            alternateWorld = alt;
-            break;
-          }
-        }
+        // 2. Check if ANY OTHER valid assignment exists with a DIFFERENT player-hand suit distribution
+        const alternateWorld = findDifferentMultisetAssignment(
+          gameState.numPlayers,
+          gameState.cards,
+          gameState.suits.length,
+          gameState.constraints,
+          playerMultisets
+        );
 
         if (!alternateWorld) {
           const nextState = {
             ...gameState,
             status: 'GAME_OVER',
+            turnNotice: null,
             log: [`🏆 ${player.name} COLLAPSED THE WAVEFUNCTION & WON!`, ...gameState.log],
             result: {
               won: true,
               title: `${player.name} Wins by Guessing Everything!`,
-              reason: `Every single card on the table was uniquely determined, and ${player.name} nailed all ${totalCards} cards!`
+              reason: `Every player's hand distribution was uniquely determined, and ${player.name} nailed the entire table!`
             }
           };
           applySyncedState(nextState, null, 'MAIN');
         } else {
+          // Non-unique Guess Everything does NOT end the game—only ends the turn!
           const nextState = {
             ...gameState,
-            status: 'GAME_OVER',
-            log: [`❌ ${player.name} guessed a valid state, but an alternate reality still existed!`, ...gameState.log],
-            result: {
-              won: false,
-              title: `${player.name}'s Guess Wasn't Unique!`,
-              reason: `While your guess was possible, the quantum state wasn't uniquely determined yet. Here is another valid counter-example:`,
+            currentTurn: nextTurn,
+            turnCount: gameState.turnCount + 1,
+            turnNotice: {
+              title: `${player.name}'s Guess Wasn't Unique! (Turn Ended)`,
+              reason: `While your hand counts were possible, an alternate reality still exists. Play passes to ${gameState.players[nextTurn].name}.`,
               counterExample: alternateWorld
-            }
+            },
+            log: [
+              `❌ ${player.name}'s Final Guess wasn't unique — turn passes to ${gameState.players[nextTurn].name}.`,
+              ...gameState.log
+            ]
           };
+          if (gameState.mode === 'passplay') setPassPrivacyScreen(true);
           applySyncedState(nextState, null, 'MAIN');
         }
       };
@@ -891,7 +1136,11 @@
         if (suitId < suitsList.length) {
           return `${suitsList[suitId].emoji} ${suitsList[suitId].name}`;
         }
-        return `❔ Mystery Suit #${suitId - suitsList.length + 1}`;
+        const unnamedRemaining = (gameState?.numPlayers || 4) - suitsList.length;
+        if (unnamedRemaining === 1) {
+          return '❔ Final Unnamed Suit';
+        }
+        return `❔ Unnamed Suit #${suitId - suitsList.length + 1}`;
       };
 
       // =========================================================================
@@ -1147,7 +1396,7 @@
 
       const currentPlayerCards = gameState.cards.filter((c) => c.owner === gameState.currentTurn);
       const canClaimVictory =
-        currentPlayerCards.length === 4 && gameState.suits.length > 0;
+        currentPlayerCards.length >= 4 && gameState.suits.length > 0;
       const mustGuessOnly = currentPlayerCards.length === 0;
 
       // Unused emojis for creating a new suit
@@ -1156,9 +1405,8 @@
 
       // Render a single face-down quantum card (with flip animation support)
       const renderCard = (card, small = false) => {
-        const anim = gameState.animatingTransfer;
-        const isRevealing =
-          anim && (anim.transferredCardId === card.id || anim.askerCardId === card.id);
+        const rev = gameState.revealingCards;
+        const isRevealing = rev && rev.cardIds.includes(card.id);
 
         return (
           <div
@@ -1181,11 +1429,11 @@
               {/* Back (Flipped Reveal Face) */}
               <div className="absolute inset-0 backface-hidden rotate-y-180 rounded-xl bg-gradient-to-br from-amber-500 to-pink-600 border-2 border-white shadow-xl flex flex-col items-center justify-center p-1 text-center">
                 <span className={small ? 'text-base' : 'text-2xl'}>
-                  {anim ? anim.suitEmoji : '✨'}
+                  {rev ? rev.suitEmoji : '✨'}
                 </span>
-                {!small && anim && (
+                {!small && rev && (
                   <span className="text-[9px] font-bold text-white leading-tight mt-1 truncate w-full">
-                    {anim.suitName}
+                    {rev.suitName}
                   </span>
                 )}
               </div>
@@ -1193,6 +1441,45 @@
           </div>
         );
       };
+
+      // Render Counter-Example Grid Helper
+      const renderCounterExampleGrid = (counterExample) => (
+        <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300">
+            Valid Counter-Example Reality (Follows Every Rule & Answer):
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {gameState.players.map((p) => {
+              const pCards = gameState.cards.filter((c) => c.owner === p.id);
+              return (
+                <div
+                  key={p.id}
+                  className="p-3 rounded-xl bg-slate-900 border border-slate-800"
+                >
+                  <div className="font-bold text-sm text-white mb-1.5">{p.name}</div>
+                  {pCards.length === 0 ? (
+                    <span className="text-xs text-slate-500 italic">0 cards</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {pCards.map((c) => {
+                        const sId = counterExample[c.id];
+                        return (
+                          <span
+                            key={c.id}
+                            className="px-2 py-1 rounded-lg bg-slate-800 text-xs text-slate-200"
+                          >
+                            #{c.id + 1}: {getSuitDisplay(sId)}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
 
       // Render Radial Tabletop for Sit-Around Mode
       const renderSitAroundTable = () => {
@@ -1382,6 +1669,12 @@
           {gameState.mode === 'passplay' && passPrivacyScreen && gameState.status === 'PLAYING' ? (
             <main className="flex-1 flex items-center justify-center p-6">
               <div className="max-w-md w-full bg-slate-900 border border-indigo-500/40 rounded-2xl p-8 text-center shadow-2xl space-y-5">
+                {gameState.turnNotice && (
+                  <div className="p-3.5 rounded-xl bg-amber-950/60 border border-amber-500/50 text-left space-y-1">
+                    <div className="text-xs font-bold text-amber-300">{gameState.turnNotice.title}</div>
+                    <div className="text-xs text-slate-200">{gameState.turnNotice.reason}</div>
+                  </div>
+                )}
                 <div className="text-4xl">🔄</div>
                 <h2 className="text-2xl font-extrabold text-white">
                   Pass Device to {activeActor.name}
@@ -1402,6 +1695,40 @@
             </main>
           ) : (
             <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-4">
+              {/* Turn Notice Banner (Refuted Claim Victory or Non-Unique Final Guess) */}
+              {gameState.status === 'PLAYING' && gameState.turnNotice && (
+                <div className="rounded-2xl border border-amber-500/70 bg-amber-950/50 p-5 shadow-xl space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <span className="text-2xl">⚖️</span>
+                      <div>
+                        <h3 className="text-base sm:text-lg font-extrabold text-amber-300">
+                          {gameState.turnNotice.title}
+                        </h3>
+                        <p className="text-xs sm:text-sm text-slate-200 mt-0.5">
+                          {gameState.turnNotice.reason}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        applySyncedState(
+                          { ...gameState, turnNotice: null },
+                          pendingAsk,
+                          actionPanel
+                        )
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 shrink-0"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  {gameState.turnNotice.counterExample &&
+                    renderCounterExampleGrid(gameState.turnNotice.counterExample)}
+                </div>
+              )}
+
               {/* Board Area */}
               {gameState.mode === 'sitaround' ? renderSitAroundTable() : renderFocusedTable()}
 
@@ -1424,44 +1751,8 @@
                     </div>
                   </div>
 
-                  {/* Valid Counter-Example Reality Breakdown */}
-                  {gameState.result.counterExample && (
-                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300">
-                        Valid Counter-Example Reality (Follows Every Rule & Answer):
-                      </h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {gameState.players.map((p) => {
-                          const pCards = gameState.cards.filter((c) => c.owner === p.id);
-                          return (
-                            <div
-                              key={p.id}
-                              className="p-3 rounded-xl bg-slate-900 border border-slate-800"
-                            >
-                              <div className="font-bold text-sm text-white mb-1.5">{p.name}</div>
-                              {pCards.length === 0 ? (
-                                <span className="text-xs text-slate-500 italic">0 cards</span>
-                              ) : (
-                                <div className="flex flex-wrap gap-1.5">
-                                  {pCards.map((c) => {
-                                    const sId = gameState.result.counterExample[c.id];
-                                    return (
-                                      <span
-                                        key={c.id}
-                                        className="px-2 py-1 rounded-lg bg-slate-800 text-xs text-slate-200"
-                                      >
-                                        #{c.id + 1}: {getSuitDisplay(sId)}
-                                      </span>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+                  {gameState.result.counterExample &&
+                    renderCounterExampleGrid(gameState.result.counterExample)}
 
                   <button
                     type="button"
@@ -1544,12 +1835,7 @@
                           type="button"
                           disabled={mustGuessOnly}
                           onClick={() => {
-                            const firstOpp = gameState.players.find(
-                              (p) =>
-                                p.id !== gameState.currentTurn &&
-                                gameState.cards.some((c) => c.owner === p.id)
-                            );
-                            setSelectedTarget(firstOpp ? firstOpp.id : null);
+                            setSelectedTarget(null);
                             setSelectedSuitOption(
                               gameState.suits.length > 0 ? gameState.suits[0].id : 'NEW'
                             );
@@ -1578,8 +1864,8 @@
                           <div className="text-xl mb-1">👑</div>
                           <div className="font-bold text-sm text-white">Claim Victory</div>
                           <div className="text-xs text-amber-100 mt-0.5">
-                            {currentPlayerCards.length !== 4
-                              ? 'Requires exactly 4 cards'
+                            {currentPlayerCards.length < 4
+                              ? 'Requires at least 4 cards'
                               : gameState.suits.length === 0
                               ? 'No suits named yet'
                               : 'Prove you hold all 4 of a suit'}
@@ -1620,7 +1906,7 @@
                         </button>
                       </div>
 
-                      {/* Target Opponent */}
+                      {/* Target Opponent (None selected by default) */}
                       <div>
                         <label className="text-xs font-semibold uppercase text-slate-400 block mb-1.5">
                           1. Select Player to Ask
@@ -1760,7 +2046,7 @@
                       </div>
                       <p className="text-xs text-slate-400">
                         Select a suit. The quantum solver will attempt to construct a valid reality where you do{' '}
-                        <strong>not</strong> hold all 4 cards of that suit. If any counter-example exists, you lose!
+                        <strong>not</strong> hold all 4 cards of that suit. If any counter-example exists, your turn ends!
                       </p>
                       <div className="flex flex-wrap gap-2">
                         {gameState.suits.map((s) => (
@@ -1803,7 +2089,7 @@
                         </button>
                       </div>
                       <p className="text-xs text-slate-400">
-                        Assign a suit to every card on the table. You win <strong>only</strong> if your assignment is valid and no other valid reality exists.
+                        Assign the suits in each player's hand (card order within a hand does not matter). You win <strong>only</strong> if no alternate distribution is possible; otherwise your turn ends!
                       </p>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-64 overflow-y-auto pr-1">
@@ -1818,10 +2104,10 @@
                               {pCards.length === 0 ? (
                                 <div className="text-xs text-slate-500 italic">0 cards</div>
                               ) : (
-                                pCards.map((c) => (
+                                pCards.map((c, idx) => (
                                   <div key={c.id} className="flex items-center justify-between gap-2">
                                     <span className="text-xs font-mono text-slate-300">
-                                      Card #{c.id + 1}
+                                      Slot {idx + 1} (#{c.id + 1})
                                     </span>
                                     <select
                                       value={guessMap[c.id] ?? 0}
@@ -1858,24 +2144,10 @@
                   )}
                 </div>
               )}
-
-              {/* Quantum Event Log */}
-              <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4">
-                <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                  Quantum Event Log
-                </div>
-                <div className="space-y-1 max-h-32 overflow-y-auto text-xs text-slate-300 font-mono">
-                  {gameState.log.map((entry, idx) => (
-                    <div key={idx} className="py-0.5 border-b border-slate-800/50 last:border-0">
-                      {entry}
-                    </div>
-                  ))}
-                </div>
-              </div>
             </main>
           )}
 
-          {/* PARADOX WARNING MODAL (Only for Orion / Magicaldroid / 😎 / Admin / Dev) */}
+          {/* PARADOX WARNING MODAL (Only for Orion / Luca / Magicaldroid / 😎 / Admin / Dev) */}
           {paradoxWarning && (
             <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="max-w-md w-full bg-slate-900 border-2 border-amber-500 rounded-2xl p-6 shadow-2xl space-y-4">
@@ -1904,7 +2176,7 @@
             </div>
           )}
 
-          {/* SECRET INSPECTOR MODAL (Orion / Dev / Konami Code) */}
+          {/* SECRET INSPECTOR MODAL (Orion / Luca / Dev / Konami Code) */}
           {inspectorOpen && analysis && (
             <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="max-w-3xl w-full bg-slate-900 border border-indigo-500 rounded-2xl p-6 shadow-2xl max-h-[85vh] overflow-y-auto space-y-4">
@@ -1914,7 +2186,7 @@
                       Quantum Omniscience Matrix
                     </span>
                     <h3 className="text-lg font-extrabold text-white">
-                      Known Cards & Eliminated Suits
+                      Known Cards, Eliminated Suits & Game Log
                     </h3>
                   </div>
                   <button
@@ -1926,6 +2198,19 @@
                   </button>
                 </div>
 
+                {/* Live Suit Deduction Summary */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-950/90 border border-slate-800 rounded-xl p-3">
+                  {analysis.suitSummaries.map((ss) => (
+                    <div key={ss.suitId} className="text-xs flex items-center justify-between px-2 py-1 rounded bg-slate-900">
+                      <span className="font-semibold text-slate-200">{ss.label}</span>
+                      <span className="font-mono text-[11px] text-indigo-300">
+                        Known: {ss.knownCards.length} • Candidates: {ss.candidateCards.length}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Per-Player Known & Eliminated Cards */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {gameState.players.map((p) => {
                     const pCards = gameState.cards.filter((c) => c.owner === p.id);
@@ -1944,6 +2229,13 @@
                           pCards.map((c) => {
                             const known = analysis.knownSuit[c.id];
                             const impossible = analysis.impossibleNamedSuits[c.id];
+                            const unnamedOut = analysis.unnamedEliminated[c.id];
+                            const eliminatedLabels = [
+                              ...impossible.map((sId) => `${gameState.suits[sId].emoji} ${gameState.suits[sId].name}`),
+                              ...(unnamedOut
+                                ? [analysis.unnamedCount === 1 ? '❔ Final Unnamed Suit' : `❔ All ${analysis.unnamedCount} Unnamed Suits`]
+                                : [])
+                            ];
                             return (
                               <div
                                 key={c.id}
@@ -1959,18 +2251,16 @@
                                     </span>
                                   ) : (
                                     <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300">
-                                      Superposition ({analysis.cardPossibilities[c.id].size} options)
+                                      Unknown ({analysis.cardPossibilities[c.id].size} possible)
                                     </span>
                                   )}
                                 </div>
                                 {known === null && (
                                   <div className="text-[11px] text-rose-300/90">
                                     Cannot be:{' '}
-                                    {impossible.length === 0
+                                    {eliminatedLabels.length === 0
                                       ? 'None eliminated yet'
-                                      : impossible
-                                          .map((sId) => `${gameState.suits[sId].emoji} ${gameState.suits[sId].name}`)
-                                          .join(', ')}
+                                      : eliminatedLabels.join(', ')}
                                   </div>
                                 )}
                               </div>
@@ -1980,6 +2270,20 @@
                       </div>
                     );
                   })}
+                </div>
+
+                {/* Quantum Event Log (Only visible in Secret Screen) */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5">
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    Quantum Event Log
+                  </div>
+                  <div className="space-y-1 max-h-40 overflow-y-auto text-xs text-slate-300 font-mono">
+                    {gameState.log.map((entry, idx) => (
+                      <div key={idx} className="py-0.5 border-b border-slate-800/50 last:border-0">
+                        {entry}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
