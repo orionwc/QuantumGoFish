@@ -14,7 +14,12 @@
       0%, 100% { transform: translateY(0px); }
       50% { transform: translateY(-4px); }
     }
+    @keyframes bannerSlideIn {
+      0% { opacity: 0; transform: translate(-50%, -24px) scale(0.96); }
+      100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+    }
     .card-float { animation: float 3s ease-in-out infinite; }
+    .banner-pop { animation: bannerSlideIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
     .perspective-1000 { perspective: 1000px; }
     .transform-style-3d { transform-style: preserve-3d; }
     .backface-hidden { backface-visibility: hidden; }
@@ -30,7 +35,7 @@
     const SPECIAL_NAMES = new Set(['orion', 'magicaldroid', '😎', 'admin', 'dev', 'luca']);
     const isSpecialName = (name) => SPECIAL_NAMES.has((name || '').trim().toLowerCase());
 
-    const EMOJI_CHOICES = [
+    const QUICK_EMOJIS = [
       '🔥', '🌊', '⚡', '🍀', '🌙', '☀️', '❄️', '💎',
       '👑', '🐉', '🦊', '🦉', '🐙', '🦄', '🍄', '🌸',
       '🚀', '🪐', '🔮', '🎲', '🎭', '⚔️', '🛡️', '🧭',
@@ -42,6 +47,18 @@
       'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight',
       'b', 'a'
     ];
+
+    // Extract first grapheme / emoji cluster cleanly so any emoji (including ZWJ / skin tones / flags) works
+    function extractFirstGrapheme(str) {
+      const trimmed = (str || '').trim();
+      if (!trimmed) return '';
+      if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+        const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+        const first = segmenter.segment(trimmed)[Symbol.iterator]().next().value;
+        return first ? first.segment : '';
+      }
+      return Array.from(trimmed)[0] || '';
+    }
 
     // =========================================================================
     // QUANTUM CONSTRAINT SOLVER ENGINE
@@ -76,7 +93,6 @@
     }
 
     // Backtracking SAT solver over card assignments (cardId -> 0..numPlayers-1)
-    // Symmetries on unnamed suit slots (suitId >= namedSuitCount) are pruned for speed.
     function findValidAssignment(numPlayers, cards, namedSuitCount, constraints, forcedOverrides = {}) {
       const totalCards = numPlayers * 4;
       const possible = Array.from({ length: totalCards }, () => new Set());
@@ -108,7 +124,6 @@
       const assignment = new Array(totalCards).fill(-1);
       const suitCounts = new Array(numPlayers).fill(0);
 
-      // Order variables by Most Constrained Variable (MRV)
       const order = Array.from({ length: totalCards }, (_, i) => i)
         .sort((a, b) => possible[a].size - possible[b].size);
 
@@ -137,7 +152,6 @@
         const cid = order[idx];
         const remainingSlots = totalCards - idx;
 
-        // Forward check: every suit must still be able to reach 4
         for (let s = 0; s < numPlayers; s++) {
           const needed = 4 - suitCounts[s];
           if (needed < 0 || needed > remainingSlots) return null;
@@ -145,7 +159,6 @@
 
         for (const s of possible[cid]) {
           if (suitCounts[s] >= 4) continue;
-          // Symmetry breaking for indistinguishable unnamed suits
           if (s >= namedSuitCount && s > maxUnnamedUsed + 1) continue;
 
           assignment[cid] = s;
@@ -166,7 +179,7 @@
       return backtrack(0, namedSuitCount - 1);
     }
 
-    // Backtracking SAT solver checking if a valid assignment exists matching each player's multiset of suits (order-independent)
+    // Order-independent multiset SAT solver
     function findValidAssignmentWithMultisets(numPlayers, cards, namedSuitCount, constraints, playerMultisets) {
       const totalCards = numPlayers * 4;
       const possible = Array.from({ length: totalCards }, () => new Set());
@@ -257,7 +270,7 @@
       return backtrack(0);
     }
 
-    // Backtracking SAT solver searching for ANY valid assignment whose per-player suit multiset differs from targetMultisets
+    // Search for any valid assignment with a different per-player suit multiset
     function findDifferentMultisetAssignment(numPlayers, cards, namedSuitCount, constraints, targetMultisets) {
       const totalCards = numPlayers * 4;
       const possible = Array.from({ length: totalCards }, () => new Set());
@@ -353,7 +366,6 @@
       return backtrack(0, namedSuitCount - 1);
     }
 
-    // Deduce exact per-card possibilities, known cards, and eliminated suits
     function analyzeQuantumState(state) {
       const { numPlayers, cards, suits, constraints } = state;
       const totalCards = numPlayers * 4;
@@ -365,7 +377,6 @@
       let sampleWorld = null;
 
       for (let cid = 0; cid < totalCards; cid++) {
-        // 1. Test each named suit individually
         for (let s = 0; s < namedCount; s++) {
           const world = findValidAssignment(numPlayers, cards, namedCount, constraints, { [cid]: s });
           if (world) {
@@ -373,7 +384,6 @@
             if (!sampleWorld) sampleWorld = world;
           }
         }
-        // 2. Test the unnamed suit equivalence class via the first unnamed slot (namedCount)
         if (unnamedCount > 0) {
           const world = findValidAssignment(numPlayers, cards, namedCount, constraints, { [cid]: namedCount });
           if (world) {
@@ -386,7 +396,6 @@
         }
       }
 
-      // Compute deterministic known cards & impossible suits per card
       const knownSuit = new Array(totalCards).fill(null);
       const impossibleNamedSuits = Array.from({ length: totalCards }, () => []);
       const unnamedEliminated = new Array(totalCards).fill(false);
@@ -405,7 +414,6 @@
         }
       }
 
-      // Compute per-suit summary (confirmed known count & candidate cards)
       const suitSummaries = [];
       for (let s = 0; s < namedCount; s++) {
         const knownCards = [];
@@ -465,14 +473,31 @@
       const [joinCodeInput, setJoinCodeInput] = useState('');
       const [myOnlineName, setMyOnlineName] = useState('');
       const [mySeatIndex, setMySeatIndex] = useState(0);
-      const [connectedPeers, setConnectedPeers] = useState([]); // [{ peerId, name, seat }]
+      const [connectedPeers, setConnectedPeers] = useState([]); // [{ clientId, name, seat }]
       const [onlineStatus, setOnlineStatus] = useState('');
+      const [joinState, setJoinState] = useState('IDLE'); // 'IDLE' | 'CONNECTING' | 'JOINED'
       const peerRef = useRef(null);
       const connsRef = useRef([]);
       const bcRef = useRef(null);
+      const myClientIdRef = useRef(null);
+      const joinRetryIntervalRef = useRef(null);
+      const connectedPeersRef = useRef([]);
+      const playerCountRef = useRef(playerCount);
+
+      useEffect(() => {
+        connectedPeersRef.current = connectedPeers;
+      }, [connectedPeers]);
+
+      useEffect(() => {
+        playerCountRef.current = playerCount;
+      }, [playerCount]);
 
       // Core Game State
       const [gameState, setGameState] = useState(null);
+
+      // Temporary Move Toast Banner (Exact Log Text)
+      const [moveBanner, setMoveBanner] = useState(null); // { id: number, text: string }
+      const lastBannerLogRef = useRef(null);
 
       // Turn Action UI State
       const [actionPanel, setActionPanel] = useState('MAIN'); // 'MAIN' | 'ASK' | 'RESPOND' | 'CLAIM' | 'GUESS'
@@ -480,7 +505,7 @@
       const [selectedTarget, setSelectedTarget] = useState(null);
       const [selectedSuitOption, setSelectedSuitOption] = useState('NEW'); // number | 'NEW'
       const [newSuitName, setNewSuitName] = useState('');
-      const [newSuitEmoji, setNewSuitEmoji] = useState(EMOJI_CHOICES[0]);
+      const [newSuitEmoji, setNewSuitEmoji] = useState(QUICK_EMOJIS[0]);
       const [claimSuitId, setClaimSuitId] = useState(null);
       const [guessMap, setGuessMap] = useState({}); // { [cardId]: suitId }
 
@@ -492,6 +517,27 @@
       const [inspectorOpen, setInspectorOpen] = useState(false);
       const konamiBufferRef = useRef([]);
 
+      // Clean up online connections on unmount or mode change
+      const cleanupOnlineConnections = () => {
+        if (joinRetryIntervalRef.current) {
+          clearInterval(joinRetryIntervalRef.current);
+          joinRetryIntervalRef.current = null;
+        }
+        if (bcRef.current) {
+          bcRef.current.close();
+          bcRef.current = null;
+        }
+        if (peerRef.current) {
+          peerRef.current.destroy();
+          peerRef.current = null;
+        }
+        connsRef.current = [];
+        setJoinState('IDLE');
+        setConnectedPeers([]);
+        setRoomCode('');
+        setOnlineStatus('');
+      };
+
       // Update playerNames array length when playerCount changes
       useEffect(() => {
         setPlayerNames((prev) => {
@@ -502,6 +548,25 @@
           return next;
         });
       }, [playerCount]);
+
+      // Trigger temporary screen banner whenever the latest log entry changes
+      useEffect(() => {
+        if (!gameState || !gameState.log || gameState.log.length === 0) {
+          lastBannerLogRef.current = null;
+          setMoveBanner(null);
+          return;
+        }
+        const latestLog = gameState.log[0];
+        if (latestLog !== lastBannerLogRef.current) {
+          lastBannerLogRef.current = latestLog;
+          const bannerId = Date.now() + Math.random();
+          setMoveBanner({ id: bannerId, text: latestLog });
+          const timer = setTimeout(() => {
+            setMoveBanner((curr) => (curr && curr.id === bannerId ? null : curr));
+          }, 4200);
+          return () => clearTimeout(timer);
+        }
+      }, [gameState?.log?.[0]]);
 
       // Konami Code Listener
       useEffect(() => {
@@ -589,30 +654,56 @@
 
       const setupOnlineHost = () => {
         if (!myOnlineName.trim()) return;
+        cleanupOnlineConnections();
+
         const code = Math.random().toString(36).substring(2, 6).toUpperCase();
+        const hostId = 'host-' + Math.random().toString(36).substring(2, 9);
+        myClientIdRef.current = hostId;
         setRoomCode(code);
         setMySeatIndex(0);
-        const initialRoster = [{ peerId: 'HOST', name: myOnlineName.trim(), seat: 0 }];
-        setConnectedPeers(initialRoster);
-        setOnlineStatus('Room created! Share code ' + code + ' with friends.');
 
-        if (bcRef.current) bcRef.current.close();
+        const initialRoster = [{ clientId: hostId, name: myOnlineName.trim(), seat: 0 }];
+        connectedPeersRef.current = initialRoster;
+        setConnectedPeers(initialRoster);
+        setOnlineStatus('Creating room ' + code + '...');
+
+        const broadcastRoster = (roster) => {
+          const msg = { type: 'ROSTER_UPDATE', roster, playerCount: playerCountRef.current };
+          if (bcRef.current) bcRef.current.postMessage(msg);
+          connsRef.current.forEach((c) => {
+            if (c && c.open) c.send(msg);
+          });
+        };
+
+        const registerJoiner = (clientId, rawName) => {
+          const cleanName = (rawName || '').trim();
+          if (!clientId || !cleanName) return;
+
+          const current = connectedPeersRef.current;
+          // Deduplicate by clientId or case-insensitive name so local/tab sync never joins twice
+          const existing = current.find(
+            (p) => p.clientId === clientId || p.name.toLowerCase() === cleanName.toLowerCase()
+          );
+          if (existing) {
+            broadcastRoster(current);
+            return;
+          }
+          if (current.length >= playerCountRef.current) {
+            return;
+          }
+          const updated = [...current, { clientId, name: cleanName, seat: current.length }];
+          connectedPeersRef.current = updated;
+          setConnectedPeers(updated);
+          broadcastRoster(updated);
+        };
+
         const bc = new BroadcastChannel('qgf_room_' + code);
         bcRef.current = bc;
         bc.onmessage = (ev) => {
           const msg = ev.data;
+          if (!msg) return;
           if (msg.type === 'JOIN_REQUEST') {
-            setConnectedPeers((prev) => {
-              if (prev.length >= playerCount) return prev;
-              const existing = prev.find((p) => p.name.toLowerCase() === msg.name.toLowerCase());
-              if (existing) {
-                bc.postMessage({ type: 'ROSTER_UPDATE', roster: prev, playerCount });
-                return prev;
-              }
-              const updated = [...prev, { peerId: msg.peerId, name: msg.name, seat: prev.length }];
-              bc.postMessage({ type: 'ROSTER_UPDATE', roster: updated, playerCount });
-              return updated;
-            });
+            registerJoiner(msg.clientId, msg.name);
           } else if (msg.type === 'SYNC_STATE') {
             setGameState(msg.gameState);
             setPendingAsk(msg.pendingAsk);
@@ -622,62 +713,107 @@
         };
 
         if (window.Peer) {
-          if (peerRef.current) peerRef.current.destroy();
           const peer = new window.Peer('qgf-room-' + code, {
-            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+            debug: 0,
+            config: {
+              iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:global.stun.twilio.com:3478' }
+              ]
+            }
           });
           peerRef.current = peer;
+
           peer.on('open', () => {
-            setOnlineStatus('Online & ready! Room Code: ' + code);
+            setOnlineStatus('Room ' + code + ' is live! Share this code with friends on any device.');
           });
+
           peer.on('connection', (conn) => {
             connsRef.current.push(conn);
+            conn.on('open', () => {
+              conn.send({
+                type: 'ROSTER_UPDATE',
+                roster: connectedPeersRef.current,
+                playerCount: playerCountRef.current
+              });
+            });
             conn.on('data', (msg) => {
+              if (!msg) return;
               if (msg.type === 'JOIN_REQUEST') {
-                setConnectedPeers((prev) => {
-                  if (prev.length >= playerCount) return prev;
-                  const updated = [...prev, { peerId: conn.peer, name: msg.name, seat: prev.length }];
-                  connsRef.current.forEach((c) => {
-                    if (c.open) c.send({ type: 'ROSTER_UPDATE', roster: updated, playerCount });
-                  });
-                  return updated;
-                });
+                registerJoiner(msg.clientId || conn.peer, msg.name);
               } else if (msg.type === 'SYNC_STATE') {
                 setGameState(msg.gameState);
                 setPendingAsk(msg.pendingAsk);
                 setActionPanel(msg.actionPanel);
                 if (msg.gameState) setScreen('GAME');
+                // Relay to all other connected devices and local tabs
+                if (bcRef.current) bcRef.current.postMessage(msg);
                 connsRef.current.forEach((c) => {
                   if (c !== conn && c.open) c.send(msg);
                 });
               }
             });
+            conn.on('close', () => {
+              connsRef.current = connsRef.current.filter((c) => c !== conn);
+            });
           });
-          peer.on('error', () => {
-            setOnlineStatus('Room ready (Local/Tab Sync active): ' + code);
+
+          peer.on('error', (err) => {
+            setOnlineStatus('Room ' + code + ' ready (Tab Sync active; P2P notice: ' + (err?.type || 'network') + ')');
           });
+        } else {
+          setOnlineStatus('Room ' + code + ' ready (Same-browser tab sync active).');
         }
       };
 
       const joinOnlineRoom = () => {
+        if (joinState !== 'IDLE') return;
         const code = joinCodeInput.trim().toUpperCase();
-        if (!code || !myOnlineName.trim()) return;
+        const cleanName = myOnlineName.trim();
+        if (code.length < 4 || !cleanName) return;
+
+        if (joinRetryIntervalRef.current) {
+          clearInterval(joinRetryIntervalRef.current);
+          joinRetryIntervalRef.current = null;
+        }
+        if (bcRef.current) bcRef.current.close();
+        if (peerRef.current) peerRef.current.destroy();
+
+        const clientId = 'guest-' + Math.random().toString(36).substring(2, 9);
+        myClientIdRef.current = clientId;
         setRoomCode(code);
+        setJoinState('CONNECTING');
         setOnlineStatus('Connecting to room ' + code + '...');
 
-        const clientId = 'guest-' + Math.random().toString(36).substring(2, 8);
-        if (bcRef.current) bcRef.current.close();
+        let acknowledged = false;
+        const handleRosterUpdate = (roster, totalCount) => {
+          setConnectedPeers(roster);
+          setPlayerCount(totalCount);
+          const me = roster.find(
+            (p) => p.clientId === clientId || p.name.toLowerCase() === cleanName.toLowerCase()
+          );
+          if (me) {
+            acknowledged = true;
+            setMySeatIndex(me.seat);
+            setJoinState('JOINED');
+            setOnlineStatus('Joined room ' + code + ' as ' + me.name + '! Waiting for host to start...');
+            if (joinRetryIntervalRef.current) {
+              clearInterval(joinRetryIntervalRef.current);
+              joinRetryIntervalRef.current = null;
+            }
+          }
+        };
+
+        // 1. Same-browser BroadcastChannel listener
         const bc = new BroadcastChannel('qgf_room_' + code);
         bcRef.current = bc;
-
         bc.onmessage = (ev) => {
           const msg = ev.data;
+          if (!msg) return;
           if (msg.type === 'ROSTER_UPDATE') {
-            setConnectedPeers(msg.roster);
-            setPlayerCount(msg.playerCount);
-            const me = msg.roster.find((p) => p.name.toLowerCase() === myOnlineName.trim().toLowerCase());
-            if (me) setMySeatIndex(me.seat);
-            setOnlineStatus('Connected to room ' + code + '! Waiting for host to start...');
+            handleRosterUpdate(msg.roster, msg.playerCount);
           } else if (msg.type === 'SYNC_STATE') {
             setGameState(msg.gameState);
             setPendingAsk(msg.pendingAsk);
@@ -685,28 +821,42 @@
             if (msg.gameState) setScreen('GAME');
           }
         };
+        bc.postMessage({ type: 'JOIN_REQUEST', clientId, name: cleanName });
 
-        bc.postMessage({ type: 'JOIN_REQUEST', peerId: clientId, name: myOnlineName.trim() });
-
+        // 2. Cross-device PeerJS connection with automatic retry & timeout handling
         if (window.Peer) {
-          if (peerRef.current) peerRef.current.destroy();
           const peer = new window.Peer(clientId, {
-            config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+            debug: 0,
+            config: {
+              iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:global.stun.twilio.com:3478' }
+              ]
+            }
           });
           peerRef.current = peer;
-          peer.on('open', () => {
-            const conn = peer.connect('qgf-room-' + code);
+
+          let activeConn = null;
+          const attemptConnect = () => {
+            if (acknowledged || !peer || peer.destroyed) return;
+            if (activeConn && activeConn.open) {
+              activeConn.send({ type: 'JOIN_REQUEST', clientId, name: cleanName });
+              return;
+            }
+            const conn = peer.connect('qgf-room-' + code, { reliable: true });
+            activeConn = conn;
             connsRef.current = [conn];
+
             conn.on('open', () => {
-              setOnlineStatus('Connected to host! Waiting for game start...');
-              conn.send({ type: 'JOIN_REQUEST', peerId: clientId, name: myOnlineName.trim() });
+              conn.send({ type: 'JOIN_REQUEST', clientId, name: cleanName });
             });
+
             conn.on('data', (msg) => {
+              if (!msg) return;
               if (msg.type === 'ROSTER_UPDATE') {
-                setConnectedPeers(msg.roster);
-                setPlayerCount(msg.playerCount);
-                const me = msg.roster.find((p) => p.name.toLowerCase() === myOnlineName.trim().toLowerCase());
-                if (me) setMySeatIndex(me.seat);
+                handleRosterUpdate(msg.roster, msg.playerCount);
               } else if (msg.type === 'SYNC_STATE') {
                 setGameState(msg.gameState);
                 setPendingAsk(msg.pendingAsk);
@@ -714,6 +864,38 @@
                 if (msg.gameState) setScreen('GAME');
               }
             });
+          };
+
+          peer.on('open', () => {
+            attemptConnect();
+            let attempts = 0;
+            joinRetryIntervalRef.current = setInterval(() => {
+              if (acknowledged) {
+                clearInterval(joinRetryIntervalRef.current);
+                joinRetryIntervalRef.current = null;
+                return;
+              }
+              attempts += 1;
+              if (attempts >= 6) {
+                clearInterval(joinRetryIntervalRef.current);
+                joinRetryIntervalRef.current = null;
+                setJoinState('IDLE');
+                setOnlineStatus('Could not reach room ' + code + '. Check the code and try again.');
+                return;
+              }
+              attemptConnect();
+            }, 2500);
+          });
+
+          peer.on('error', (err) => {
+            if (err && err.type === 'peer-unavailable') {
+              if (joinRetryIntervalRef.current) {
+                clearInterval(joinRetryIntervalRef.current);
+                joinRetryIntervalRef.current = null;
+              }
+              setJoinState('IDLE');
+              setOnlineStatus('Room ' + code + ' not found. Make sure the host generated the code first.');
+            }
           });
         }
       };
@@ -764,11 +946,13 @@
         let updatedSuits = [...gameState.suits];
 
         if (suitChoice === 'NEW') {
+          const cleanEmoji = extractFirstGrapheme(customEmoji);
+          if (!cleanEmoji || updatedSuits.some((s) => s.emoji === cleanEmoji)) return;
           suitId = updatedSuits.length;
           updatedSuits.push({
             id: suitId,
             name: customName.trim(),
-            emoji: customEmoji
+            emoji: cleanEmoji
           });
         } else {
           suitId = Number(suitChoice);
@@ -778,7 +962,6 @@
         const askerCards = gameState.cards.filter((c) => c.owner === askerIdx);
         const targetCards = gameState.cards.filter((c) => c.owner === targetIdx);
 
-        // Pick a valid card in asker's hand that can be suitId to flip over as proof
         const validAskerCard =
           targetCards.length > 0
             ? askerCards.find((ac) =>
@@ -800,7 +983,6 @@
             return;
           }
 
-          // Flip over asker's proof card and lock its suit
           const committedConstraints = [
             ...gameState.constraints,
             { type: 'IS_SUIT', cardId: validAskerCard.id, suitId }
@@ -910,7 +1092,6 @@
             return;
           }
 
-          // YES: Pick a valid card from target that can be suitId, flip reveal it alongside asker's card, then slide across and flip back!
           const validTargetCard =
             targetCards.find((tc) =>
               findValidAssignment(gameState.numPlayers, gameState.cards, gameState.suits.length, [
@@ -984,11 +1165,8 @@
         const suitObj = gameState.suits[suitId];
         const playerCards = gameState.cards.filter((c) => c.owner === playerIdx);
 
-        // Anyone with at least 4 cards can claim victory
         if (playerCards.length < 4) return;
 
-        // Try to find ANY valid world where at least one card owned by someone else IS suitId
-        // If no other player can hold suitId, then all 4 cards of suitId must belong to player!
         const otherCards = gameState.cards.filter((c) => c.owner !== playerIdx);
         const counterConstraints = [
           ...gameState.constraints,
@@ -1019,7 +1197,6 @@
           };
           applySyncedState(nextState, null, 'MAIN');
         } else {
-          // Failed Claim Victory does NOT end the game—only ends the turn!
           const nextTurn = (playerIdx + 1) % gameState.numPlayers;
           const nextState = {
             ...gameState,
@@ -1045,7 +1222,6 @@
         const player = gameState.players[playerIdx];
         const totalCards = gameState.numPlayers * 4;
 
-        // Build per-player suit multisets (order-independent)
         const playerMultisets = Array.from({ length: gameState.numPlayers }, () =>
           new Array(gameState.numPlayers).fill(0)
         );
@@ -1056,7 +1232,6 @@
           playerMultisets[owner][suitId]++;
         }
 
-        // 1. Check if ANY valid assignment exists matching the guessed suit counts per player (order doesn't matter)
         const matchingWorld = findValidAssignmentWithMultisets(
           gameState.numPlayers,
           gameState.cards,
@@ -1088,7 +1263,6 @@
           return;
         }
 
-        // 2. Check if ANY OTHER valid assignment exists with a DIFFERENT player-hand suit distribution
         const alternateWorld = findDifferentMultisetAssignment(
           gameState.numPlayers,
           gameState.cards,
@@ -1111,7 +1285,6 @@
           };
           applySyncedState(nextState, null, 'MAIN');
         } else {
-          // Non-unique Guess Everything does NOT end the game—only ends the turn!
           const nextState = {
             ...gameState,
             currentTurn: nextTurn,
@@ -1131,7 +1304,6 @@
         }
       };
 
-      // Helper to render suit badge (named or unnamed slot)
       const getSuitDisplay = (suitId, suitsList = gameState?.suits || []) => {
         if (suitId < suitsList.length) {
           return `${suitsList[suitId].emoji} ${suitsList[suitId].name}`;
@@ -1155,7 +1327,6 @@
 
         return (
           <div className="min-h-screen flex flex-col">
-            {/* Header with Invisible Secret Logo Trigger */}
             <header className="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur px-6 py-4 flex items-center justify-between">
               <div
                 onClick={handleLogoClick}
@@ -1199,7 +1370,10 @@
                       <button
                         key={m.id}
                         type="button"
-                        onClick={() => setMode(m.id)}
+                        onClick={() => {
+                          if (mode === 'online' && m.id !== 'online') cleanupOnlineConnections();
+                          setMode(m.id);
+                        }}
                         className={`p-3 rounded-xl border text-left transition ${
                           mode === m.id
                             ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-lg shadow-indigo-500/10'
@@ -1239,7 +1413,7 @@
                   </div>
                 )}
 
-                {/* Local Player Names (No Autofill) */}
+                {/* Local Player Names */}
                 {mode !== 'online' && (
                   <div className="space-y-3">
                     <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -1274,7 +1448,10 @@
                     <div className="flex gap-2">
                       <button
                         type="button"
-                        onClick={() => setOnlineRole('HOST')}
+                        onClick={() => {
+                          cleanupOnlineConnections();
+                          setOnlineRole('HOST');
+                        }}
                         className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider ${
                           onlineRole === 'HOST'
                             ? 'bg-indigo-600 text-white'
@@ -1285,7 +1462,10 @@
                       </button>
                       <button
                         type="button"
-                        onClick={() => setOnlineRole('GUEST')}
+                        onClick={() => {
+                          cleanupOnlineConnections();
+                          setOnlineRole('GUEST');
+                        }}
                         className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider ${
                           onlineRole === 'GUEST'
                             ? 'bg-indigo-600 text-white'
@@ -1300,10 +1480,11 @@
                       <label className="text-xs text-slate-400 block mb-1">Your Display Name</label>
                       <input
                         type="text"
+                        disabled={onlineRole === 'GUEST' && joinState !== 'IDLE'}
                         value={myOnlineName}
                         onChange={(e) => setMyOnlineName(e.target.value)}
                         placeholder="Enter your name..."
-                        className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 outline-none"
+                        className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 disabled:opacity-50 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 outline-none"
                       />
                     </div>
 
@@ -1341,20 +1522,37 @@
                           <input
                             type="text"
                             maxLength={4}
+                            disabled={joinState !== 'IDLE'}
                             value={joinCodeInput}
                             onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
                             placeholder="4-LETTER CODE"
-                            className="flex-1 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-2.5 text-sm font-mono uppercase tracking-widest text-white placeholder-slate-600 outline-none"
+                            className="flex-1 bg-slate-900 border border-slate-800 focus:border-indigo-500 disabled:opacity-50 rounded-xl px-4 py-2.5 text-sm font-mono uppercase tracking-widest text-white placeholder-slate-600 outline-none"
                           />
                           <button
                             type="button"
-                            disabled={!myOnlineName.trim() || joinCodeInput.trim().length < 4}
+                            disabled={
+                              joinState !== 'IDLE' ||
+                              !myOnlineName.trim() ||
+                              joinCodeInput.trim().length < 4
+                            }
                             onClick={joinOnlineRoom}
-                            className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 font-semibold text-sm transition"
+                            className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed font-semibold text-sm transition"
                           >
-                            Join
+                            {joinState === 'CONNECTING'
+                              ? 'Joining...'
+                              : joinState === 'JOINED'
+                              ? 'Joined'
+                              : 'Join'}
                           </button>
                         </div>
+                        {connectedPeers.length > 0 && (
+                          <div className="text-xs text-slate-400">
+                            Room Players ({connectedPeers.length}/{playerCount}):{' '}
+                            <span className="text-slate-200 font-medium">
+                              {connectedPeers.map((p) => p.name).join(', ')}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1399,9 +1597,11 @@
         currentPlayerCards.length >= 4 && gameState.suits.length > 0;
       const mustGuessOnly = currentPlayerCards.length === 0;
 
-      // Unused emojis for creating a new suit
+      // Used emojis across existing suits; any unused emoji is allowed
       const usedEmojis = new Set(gameState.suits.map((s) => s.emoji));
-      const availableEmojis = EMOJI_CHOICES.filter((e) => !usedEmojis.has(e));
+      const availableQuickEmojis = QUICK_EMOJIS.filter((e) => !usedEmojis.has(e));
+      const parsedCustomEmoji = extractFirstGrapheme(newSuitEmoji);
+      const isEmojiUnique = parsedCustomEmoji.length > 0 && !usedEmojis.has(parsedCustomEmoji);
 
       // Render a single face-down quantum card (with flip animation support)
       const renderCard = (card, small = false) => {
@@ -1420,13 +1620,11 @@
                 isRevealing ? 'rotate-y-180 scale-110' : ''
               }`}
             >
-              {/* Front (Face Down Quantum Back) */}
               <div className="absolute inset-0 backface-hidden rounded-xl bg-gradient-to-br from-indigo-900 via-slate-900 to-purple-950 border border-indigo-400/40 shadow-md flex flex-col items-center justify-center">
                 <span className={small ? 'text-xs' : 'text-lg'}>⚛️</span>
                 <span className="text-[9px] font-mono text-indigo-300/70 mt-0.5">#{card.id + 1}</span>
               </div>
 
-              {/* Back (Flipped Reveal Face) */}
               <div className="absolute inset-0 backface-hidden rotate-y-180 rounded-xl bg-gradient-to-br from-amber-500 to-pink-600 border-2 border-white shadow-xl flex flex-col items-center justify-center p-1 text-center">
                 <span className={small ? 'text-base' : 'text-2xl'}>
                   {rev ? rev.suitEmoji : '✨'}
@@ -1442,7 +1640,6 @@
         );
       };
 
-      // Render Counter-Example Grid Helper
       const renderCounterExampleGrid = (counterExample) => (
         <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
           <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300">
@@ -1481,12 +1678,10 @@
         </div>
       );
 
-      // Render Radial Tabletop for Sit-Around Mode
       const renderSitAroundTable = () => {
         const n = gameState.numPlayers;
         return (
           <div className="relative w-full max-w-3xl aspect-square max-h-[430px] mx-auto my-2 flex items-center justify-center">
-            {/* Table Felt Ring */}
             <div className="absolute inset-8 sm:inset-12 rounded-full border-2 border-dashed border-indigo-500/25 bg-slate-900/40 flex items-center justify-center">
               <div className="text-center px-4">
                 <div className="text-xs uppercase tracking-widest text-indigo-400 font-bold">
@@ -1503,7 +1698,6 @@
               </div>
             </div>
 
-            {/* Player Seats Positioned Around Circle */}
             {gameState.players.map((p, idx) => {
               const angle = (idx / n) * 2 * Math.PI - Math.PI / 2;
               const radiusPct = 41;
@@ -1544,7 +1738,6 @@
         );
       };
 
-      // Render Pass & Play or Online View (Opponents Top, Active Player Front & Center)
       const renderFocusedTable = () => {
         const focusSeat =
           gameState.mode === 'online' ? mySeatIndex : activeActorIdx;
@@ -1554,7 +1747,6 @@
 
         return (
           <div className="max-w-4xl w-full mx-auto space-y-6 my-2">
-            {/* Opponents Row at Top */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {opponents.map((opp) => {
                 const oppCards = gameState.cards.filter((c) => c.owner === opp.id);
@@ -1586,7 +1778,6 @@
               })}
             </div>
 
-            {/* Front & Center Hand */}
             <div
               className={`p-5 rounded-2xl border text-center transition ${
                 activeActorIdx === focusSeat && gameState.status === 'PLAYING'
@@ -1618,7 +1809,21 @@
       };
 
       return (
-        <div className="min-h-screen flex flex-col">
+        <div className="min-h-screen flex flex-col relative">
+          {/* Temporary Floating Move Banner (Exact Log Text) */}
+          {moveBanner && (
+            <div
+              key={moveBanner.id}
+              onClick={() => setMoveBanner(null)}
+              className="banner-pop fixed top-16 left-1/2 z-40 w-[92%] max-w-2xl bg-slate-900/95 border border-indigo-400/80 shadow-2xl shadow-indigo-950/80 backdrop-blur-md rounded-2xl px-5 py-3.5 flex items-center justify-between gap-3 cursor-pointer"
+            >
+              <p className="text-xs sm:text-sm font-semibold text-white leading-snug">
+                {moveBanner.text}
+              </p>
+              <span className="text-[11px] text-indigo-300 shrink-0 font-bold">✕</span>
+            </div>
+          )}
+
           {/* Top Bar with Invisible Logo Secret Trigger */}
           <header className="border-b border-slate-800/80 bg-slate-900/80 backdrop-blur px-4 sm:px-6 py-3 flex items-center justify-between sticky top-0 z-30">
             <div
@@ -1657,6 +1862,7 @@
                   setGameState(null);
                   setPendingAsk(null);
                   setActionPanel('MAIN');
+                  setMoveBanner(null);
                 }}
                 className="ml-2 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-semibold"
               >
@@ -1695,7 +1901,7 @@
             </main>
           ) : (
             <main className="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-4">
-              {/* Turn Notice Banner (Refuted Claim Victory or Non-Unique Final Guess) */}
+              {/* Turn Notice Banner */}
               {gameState.status === 'PLAYING' && gameState.turnNotice && (
                 <div className="rounded-2xl border border-amber-500/70 bg-amber-950/50 p-5 shadow-xl space-y-3">
                   <div className="flex items-start justify-between gap-3">
@@ -1732,7 +1938,7 @@
               {/* Board Area */}
               {gameState.mode === 'sitaround' ? renderSitAroundTable() : renderFocusedTable()}
 
-              {/* Game Over Banner + Counter-Example Viewer */}
+              {/* Game Over Banner */}
               {gameState.status === 'GAME_OVER' && gameState.result && (
                 <div
                   className={`rounded-2xl border p-6 shadow-2xl space-y-4 ${
@@ -1778,7 +1984,6 @@
                       Waiting for <strong className="text-white">{activeActor.name}</strong> to make a move...
                     </div>
                   ) : actionPanel === 'RESPOND' && pendingAsk ? (
-                    /* YES / NO RESPONSE PANEL */
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
                         <div>
@@ -1819,7 +2024,6 @@
                       </div>
                     </div>
                   ) : actionPanel === 'MAIN' ? (
-                    /* MAIN TURN OPTIONS: GO FISH / CLAIM VICTORY / GUESS EVERYTHING */
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <h3 className="text-base font-bold text-white">
@@ -1840,7 +2044,7 @@
                               gameState.suits.length > 0 ? gameState.suits[0].id : 'NEW'
                             );
                             setNewSuitName('');
-                            setNewSuitEmoji(availableEmojis[0] || '🌟');
+                            setNewSuitEmoji(availableQuickEmojis[0] || '🌟');
                             setActionPanel('ASK');
                           }}
                           className="p-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-35 disabled:cursor-not-allowed text-left transition shadow-lg shadow-indigo-600/20"
@@ -1893,7 +2097,6 @@
                       </div>
                     </div>
                   ) : actionPanel === 'ASK' ? (
-                    /* GO FISH ASK BUILDER */
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
                         <h3 className="text-base font-bold text-white">🎣 Go Fish — Ask a Player</h3>
@@ -1906,7 +2109,7 @@
                         </button>
                       </div>
 
-                      {/* Target Opponent (None selected by default) */}
+                      {/* Target Opponent */}
                       <div>
                         <label className="text-xs font-semibold uppercase text-slate-400 block mb-1.5">
                           1. Select Player to Ask
@@ -1972,33 +2175,59 @@
                         </div>
                       </div>
 
-                      {/* New Suit Creator */}
+                      {/* New Suit Creator (Allows ANY Emoji via keyboard/picker + quick picks) */}
                       {selectedSuitOption === 'NEW' && (
                         <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
-                          <div>
-                            <label className="text-xs text-slate-400 block mb-1">
-                              New Suit Name
-                            </label>
-                            <input
-                              type="text"
-                              value={newSuitName}
-                              onChange={(e) => setNewSuitName(e.target.value)}
-                              placeholder="Type any suit name (e.g. Dragons, Pizza, Lasers)..."
-                              className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none"
-                            />
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="sm:col-span-2">
+                              <label className="text-xs text-slate-400 block mb-1">
+                                New Suit Name
+                              </label>
+                              <input
+                                type="text"
+                                value={newSuitName}
+                                onChange={(e) => setNewSuitName(e.target.value)}
+                                placeholder="Type any suit name (e.g. Dragons, Pizza, Lasers)..."
+                                className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs text-slate-400 block mb-1">
+                                Any Emoji (Type or Pick)
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={newSuitEmoji}
+                                  onChange={(e) => {
+                                    const g = extractFirstGrapheme(e.target.value);
+                                    setNewSuitEmoji(g || e.target.value);
+                                  }}
+                                  placeholder="Type any emoji..."
+                                  className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-2 text-center text-lg text-white outline-none"
+                                />
+                              </div>
+                            </div>
                           </div>
+
+                          {!isEmojiUnique && parsedCustomEmoji && (
+                            <p className="text-xs text-rose-400">
+                              That emoji ({parsedCustomEmoji}) is already used by another suit—pick or type a different one.
+                            </p>
+                          )}
+
                           <div>
                             <label className="text-xs text-slate-400 block mb-1">
-                              Pick a Unique Emoji
+                              Quick Picks (Or use your device emoji keyboard above!)
                             </label>
                             <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-1">
-                              {availableEmojis.map((em) => (
+                              {availableQuickEmojis.map((em) => (
                                 <button
                                   key={em}
                                   type="button"
                                   onClick={() => setNewSuitEmoji(em)}
                                   className={`w-8 h-8 rounded-lg flex items-center justify-center text-base border ${
-                                    newSuitEmoji === em
+                                    parsedCustomEmoji === em
                                       ? 'bg-indigo-600 border-white scale-110'
                                       : 'bg-slate-900 border-slate-800 hover:border-slate-600'
                                   }`}
@@ -2017,12 +2246,13 @@
                           selectedTarget === null ||
                           (selectedSuitOption === 'NEW' &&
                             (!newSuitName.trim() ||
+                              !isEmojiUnique ||
                               gameState.suits.some(
                                 (s) => s.name.toLowerCase() === newSuitName.trim().toLowerCase()
                               )))
                         }
                         onClick={() =>
-                          executeAsk(selectedTarget, selectedSuitOption, newSuitName, newSuitEmoji)
+                          executeAsk(selectedTarget, selectedSuitOption, newSuitName, parsedCustomEmoji)
                         }
                         className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 font-bold text-sm text-white transition"
                       >
@@ -2030,7 +2260,6 @@
                       </button>
                     </div>
                   ) : actionPanel === 'CLAIM' ? (
-                    /* CLAIM VICTORY PANEL */
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
                         <h3 className="text-base font-bold text-white">
@@ -2074,7 +2303,6 @@
                       </button>
                     </div>
                   ) : (
-                    /* GUESS EVERYTHING PANEL */
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
                         <h3 className="text-base font-bold text-white">
@@ -2147,7 +2375,7 @@
             </main>
           )}
 
-          {/* PARADOX WARNING MODAL (Only for Orion / Luca / Magicaldroid / 😎 / Admin / Dev) */}
+          {/* PARADOX WARNING MODAL */}
           {paradoxWarning && (
             <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="max-w-md w-full bg-slate-900 border-2 border-amber-500 rounded-2xl p-6 shadow-2xl space-y-4">
@@ -2176,10 +2404,10 @@
             </div>
           )}
 
-          {/* SECRET INSPECTOR MODAL (Orion / Luca / Dev / Konami Code) */}
+          {/* SECRET INSPECTOR MODAL */}
           {inspectorOpen && analysis && (
             <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="max-w-3xl w-full bg-slate-900 border border-indigo-500 rounded-2xl p-6 shadow-2xl max-h-[85vh] overflow-y-auto space-y-4">
+              <div className="max-w-4xl w-full bg-slate-900 border border-indigo-500 rounded-2xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                   <div>
                     <span className="text-[10px] uppercase tracking-widest font-bold text-indigo-400">
@@ -2272,14 +2500,14 @@
                   })}
                 </div>
 
-                {/* Quantum Event Log (Only visible in Secret Screen) */}
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5">
+                {/* Enlarged Quantum Event Log */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
                   <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                    Quantum Event Log
+                    Quantum Event Log ({gameState.log.length} entries)
                   </div>
-                  <div className="space-y-1 max-h-40 overflow-y-auto text-xs text-slate-300 font-mono">
+                  <div className="space-y-1.5 max-h-96 overflow-y-auto text-xs sm:text-sm text-slate-200 font-mono pr-1">
                     {gameState.log.map((entry, idx) => (
-                      <div key={idx} className="py-0.5 border-b border-slate-800/50 last:border-0">
+                      <div key={idx} className="py-1 border-b border-slate-800/60 last:border-0 leading-relaxed">
                         {entry}
                       </div>
                     ))}
